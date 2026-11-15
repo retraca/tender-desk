@@ -1,0 +1,46 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Tender desk</title>
+<style>body{font:16px system-ui,sans-serif;max-width:22rem;margin:18vh auto;padding:0 1rem}input,button{font:inherit;width:100%;box-sizing:border-box;padding:.7rem;margin:.4rem 0}#m{color:#b00;min-height:1.4em}</style>
+</head><body><form id="f"><h1>Tender desk</h1><input id="p" type="password" autocomplete="current-password" placeholder="Password" autofocus>
+<label><input id="r" type="checkbox" style="width:auto" checked> Remember on this device</label><button>Open</button><p id="m"></p></form>
+<script>
+// "Remember" keeps a NON-extractable AES key in IndexedDB (never raw key bytes): scripts on the shared
+// retraca.github.io origin could use it while open but can't copy it out. Unticked = nothing stored.
+const S=crypto.subtle,SLOT="key";   // one remembered key per site on this origin
+localStorage.removeItem("tender-desk-saved");   // older loader kept raw key bytes there
+function db(mode,fn){return new Promise((ok,no)=>{const r=indexedDB.open("tender-desk",1);
+  r.onupgradeneeded=()=>r.result.createObjectStore("k");r.onerror=()=>no(r.error);
+  r.onsuccess=()=>{const t=r.result.transaction("k",mode),q=fn(t.objectStore("k"));t.oncomplete=()=>ok(q&&q.result);t.onerror=()=>no(t.error)}})}
+async function keyFor(pw,salt){
+  const base=await S.importKey("raw",new TextEncoder().encode(pw),"PBKDF2",false,["deriveKey"]);
+  return S.deriveKey({name:"PBKDF2",hash:"SHA-256",salt,iterations:600000},base,{name:"AES-GCM",length:256},false,["decrypt"]);
+}
+async function unlock(b,key){
+  const pt=await S.decrypt({name:"AES-GCM",iv:b.subarray(16,28)},key,b.subarray(28));
+  const txt=await new Response(new Blob([pt]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+  return JSON.parse(txt);
+}
+function mount(files){
+  const data={};for(const n in files)if(n.endsWith(".json"))data[n]=files[n];
+  const real=window.fetch;
+  window.fetch=(u,o)=>{const n=String(u).split("/").pop().split("?")[0];
+    return n in data?Promise.resolve(new Response(data[n],{headers:{"content-type":"application/json"}})):real(u,o)};
+  const doc=new DOMParser().parseFromString(files["index.html"],"text/html");
+  document.title=doc.title;document.head.querySelectorAll("style").forEach(s=>s.remove());
+  doc.head.querySelectorAll("style").forEach(s=>document.head.appendChild(s));
+  document.body.replaceChildren(...[...doc.body.childNodes].filter(n=>n.nodeName!=="SCRIPT"));
+  for(const s of doc.body.querySelectorAll("script")){const x=document.createElement("script");x.textContent=s.textContent;document.body.appendChild(x)}
+}
+const m=document.getElementById("m");
+(async()=>{
+  const b=new Uint8Array(await (await fetch("data.bin",{cache:"no-cache"})).arrayBuffer()),salt=b.subarray(0,16);
+  const tag=btoa(String.fromCharCode(...salt));
+  try{const saved=await db("readonly",o=>o.get(SLOT));
+    if(saved&&saved.salt===tag){mount(await unlock(b,saved.key));return}}catch(e){}
+  document.getElementById("f").onsubmit=async e=>{e.preventDefault();m.textContent="Opening…";
+    let files,key;
+    try{key=await keyFor(document.getElementById("p").value,salt);files=await unlock(b,key)}catch(err){m.textContent="Wrong password.";return}
+    try{await db("readwrite",o=>document.getElementById("r").checked?o.put({salt:tag,key},SLOT):o.delete(SLOT))}catch(e){}
+    mount(files)};
+})();
+</script></body></html>
